@@ -9,7 +9,6 @@ from html.parser import HTMLParser
 from html.entities import name2codepoint
 from math import ceil, log
 
-
 class MyHTMLParser(HTMLParser):
     def handle_starttag(self, tag, attrs):
         global data_html
@@ -59,6 +58,14 @@ def select_epubs():
     else:
         file_label.configure(text="No files selected")
 
+def select_destination_folder():
+    global dest_folder
+    dest_folder = filedialog.askdirectory()
+    if dest_folder:
+        dest_folder_label.configure(text=f"Destination: {dest_folder}")
+    else:
+        dest_folder_label.configure(text="No destination folder selected")
+
 def log_message(message):
     log_text.configure(state='normal')
     log_text.insert(ctk.END, message + '\n')
@@ -69,9 +76,12 @@ def generate_epubs():
     if 'file_paths' not in globals() or not file_paths:
         messagebox.showerror("Error", "Please select EPUB files first")
         return
+    if 'dest_folder' not in globals() or not dest_folder:
+        messagebox.showerror("Error", "Please select a destination folder first")
+        return
 
-    if not os.path.exists("Generados"):
-        os.makedirs("Generados")
+    if not os.path.exists(dest_folder):
+        os.makedirs(dest_folder)
 
     for widget in progress_inner_frame.winfo_children():
         widget.destroy()
@@ -91,7 +101,7 @@ def generate_epubs():
 def generate_epub(file_path):
     original_cwd = os.getcwd()  # Save the original current working directory
     file_name = os.path.basename(file_path)
-    epub_path = os.path.join(original_cwd, 'Generados', 'bionic_' + file_name)
+    epub_path = os.path.join(dest_folder, 'bionic_' + file_name)
     unzip_path_folder = file_name + '_zip/'
     unzip_path = os.path.join(original_cwd, unzip_path_folder)
 
@@ -174,7 +184,6 @@ def generate_epub(file_path):
 
     log_message(f"Modified EPUB created at {epub_path}.epub")
 
-
 # Configuración de la interfaz gráfica con customtkinter
 ctk.set_appearance_mode("System")  # Opciones: "System" (Default), "Light", "Dark"
 ctk.set_default_color_theme("blue")  # Opciones: "blue" (Default), "green", "dark-blue"
@@ -222,6 +231,12 @@ file_label.pack(pady=10)
 
 select_button = ctk.CTkButton(button_frame, text="Select EPUB Files", command=select_epubs)
 select_button.pack(pady=10)
+
+dest_folder_label = ctk.CTkLabel(button_frame, text="No destination folder selected", font=("Helvetica", 10))
+dest_folder_label.pack(pady=10)
+
+dest_folder_button = ctk.CTkButton(button_frame, text="Select Destination Folder", command=select_destination_folder)
+dest_folder_button.pack(pady=10)
 
 generate_button = ctk.CTkButton(button_frame, text="Generate Modified EPUBs", command=generate_epubs)
 generate_button.pack(pady=10)
