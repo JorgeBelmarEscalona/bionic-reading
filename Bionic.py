@@ -154,7 +154,10 @@ def process_html_file(html_file, first_tags):
         if len(html_part) == 2 and html_part[0][0] == 'Start tag:':
             tag = '<' + html_part[0][1]
             full_attr = [f'{attr[0]}="{attr[1]}"' for attr in html_part[1][1]]
-            tag += ' ' + ' '.join(full_attr) + '>'
+            attr_str = ' '.join(full_attr)
+            if attr_str:
+                tag += ' ' + attr_str
+            tag += '>'
             full_html += tag
         if html_part[0] == 'End tag:':
             tag = f"</{html_part[1]}>"
