@@ -9,6 +9,10 @@ from zipfile import ZipFile
 from html.parser import HTMLParser
 from math import ceil, log
 
+# User selections stored globally so buttons can operate independently
+selected_file_paths = []
+selected_dest_folder = ""
+
 class MyHTMLParser(HTMLParser):
     def __init__(self):
         super().__init__()
@@ -37,11 +41,14 @@ def bolding(text):
     return new_text
 
 def select_epubs():
+    global selected_file_paths
     file_paths = filedialog.askopenfilenames(filetypes=[("EPUB files", "*.epub")])
+    selected_file_paths = file_paths
     file_label.configure(text=f"{len(file_paths)} files selected" if file_paths else "No files selected")
     return file_paths
 
 def select_destination_folder():
+    global selected_dest_folder
     dest_folder = filedialog.askdirectory()
     if dest_folder:
         dest_folder = os.path.join(dest_folder, "Generados")
@@ -50,6 +57,7 @@ def select_destination_folder():
         dest_folder_label.configure(text=truncate_text(f"Destination: {dest_folder}", 50))
     else:
         dest_folder_label.configure(text="No destination folder selected")
+    selected_dest_folder = dest_folder
     return dest_folder
 
 def log_message(message):
@@ -57,6 +65,10 @@ def log_message(message):
     log_text.insert(ctk.END, message + '\n')
     log_text.configure(state='disabled')
     log_text.yview(ctk.END)
+
+def change_theme(new_theme):
+    """Update application appearance mode."""
+    ctk.set_appearance_mode(new_theme)
 
 def generate_epubs(file_paths, dest_folder):
     if not file_paths:
@@ -232,10 +244,14 @@ log_text.configure(yscrollcommand=log_scroll.set)
 title_label = ctk.CTkLabel(button_frame, text="EPUB Modifier", font=("Helvetica", 16))
 title_label.pack(pady=10)
 
+theme_option = ctk.CTkOptionMenu(button_frame, values=["System", "Light", "Dark"], command=change_theme)
+theme_option.set("System")
+theme_option.pack(pady=5)
+
 file_label = ctk.CTkLabel(button_frame, text="No files selected", font=("Helvetica", 10))
 file_label.pack(pady=10)
 
-select_button = ctk.CTkButton(button_frame, text="Select EPUB Files", command=lambda: generate_epubs(select_epubs(), select_destination_folder()))
+select_button = ctk.CTkButton(button_frame, text="Select EPUB Files", command=select_epubs)
 select_button.pack(pady=10)
 
 dest_folder_label = ctk.CTkLabel(button_frame, text="No destination folder selected", font=("Helvetica", 10))
@@ -244,7 +260,7 @@ dest_folder_label.pack(pady=10, fill="both", expand=True)
 dest_folder_button = ctk.CTkButton(button_frame, text="Select Destination Folder", command=select_destination_folder)
 dest_folder_button.pack(pady=10)
 
-generate_button = ctk.CTkButton(button_frame, text="Generate Modified EPUBs", command=lambda: generate_epubs(select_epubs(), select_destination_folder()))
+generate_button = ctk.CTkButton(button_frame, text="Generate Modified EPUBs", command=lambda: generate_epubs(selected_file_paths, selected_dest_folder))
 generate_button.pack(pady=10)
 
 root.mainloop()
