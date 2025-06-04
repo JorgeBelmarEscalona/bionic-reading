@@ -3,6 +3,7 @@ import re
 import shutil
 import string
 import threading
+from queue import Queue
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
 from zipfile import ZipFile
@@ -19,6 +20,13 @@ class AppState:
 
 
 state = AppState()
+
+# Queue for safely communicating UI updates from worker threads
+ui_queue = Queue()
+# Store per-file progress bars
+progress_bars = {}
+# Overall progress bar reference created at runtime
+overall_progress = None
 
 class MyHTMLParser(HTMLParser):
     def __init__(self):
@@ -79,7 +87,45 @@ def change_theme(new_theme):
     """Update application appearance mode."""
     ctk.set_appearance_mode(new_theme)
 
+
+def handle_ui_queue():
+    """Process UI update events from the worker thread."""
+    while not ui_queue.empty():
+        event = ui_queue.get()
+        etype = event[0]
+        if etype == "log":
+            log_message(event[1])
+        elif etype == "create_progress":
+            file_name = event[1]
+            label = ctk.CTkLabel(
+                progress_inner_frame,
+                text=truncate_text(file_name, 50),
+                text_color="black",
+            )
+            label.pack(pady=5)
+            bar = ctk.CTkProgressBar(
+                progress_inner_frame,
+                orientation="horizontal",
+                mode="determinate",
+            )
+            bar.pack(pady=10, padx=10)
+            bar.set(0)
+            bar.configure(width=300)
+            progress_bars[file_name] = bar
+        elif etype == "update_progress":
+            file_name = event[1]
+            inc = event[2]
+            bar = progress_bars.get(file_name)
+            if bar:
+                bar.set(min(bar.get() + inc, 1))
+        elif etype == "overall_progress":
+            inc = event[1]
+            if overall_progress:
+                overall_progress.set(min(overall_progress.get() + inc, 1))
+    root.after(100, handle_ui_queue)
+
 def generate_epubs(file_paths, dest_folder):
+    global overall_progress
     if not file_paths:
         messagebox.showerror("Error", "Please select EPUB files first")
         return
@@ -93,7 +139,9 @@ def generate_epubs(file_paths, dest_folder):
     for widget in progress_inner_frame.winfo_children():
         widget.destroy()
 
-    overall_progress = ctk.CTkProgressBar(progress_inner_frame, orientation="horizontal", mode="determinate")
+    overall_progress = ctk.CTkProgressBar(
+        progress_inner_frame, orientation="horizontal", mode="determinate"
+    )
     overall_progress.pack(pady=10, padx=10)
     overall_progress.set(0)
     overall_progress.configure(width=300)
@@ -103,55 +151,54 @@ def generate_epubs(file_paths, dest_folder):
     def process_files():
         for file_path in file_paths:
             generate_epub(file_path, dest_folder)
-            overall_progress.set(overall_progress.get() + step)
-            root.update_idletasks()
-        log_message("All EPUB files processed successfully.")
+            ui_queue.put(("overall_progress", step))
+        ui_queue.put(("log", "All EPUB files processed successfully."))
 
-    thread = threading.Thread(target=process_files)
+    thread = threading.Thread(target=process_files, daemon=True)
     thread.start()
 
 def generate_epub(file_path, dest_folder):
+    """Process a single EPUB file without performing UI updates."""
     original_cwd = os.getcwd()
     file_name = os.path.basename(file_path)
-    epub_path = os.path.join(dest_folder, 'b_' + file_name)
-    unzip_path_folder = file_name + '_zip/'
+    epub_path = os.path.join(dest_folder, "b_" + file_name)
+    unzip_path_folder = file_name + "_zip/"
     unzip_path = os.path.join(original_cwd, unzip_path_folder)
 
-    log_message(f"Processing {file_name}...")
+    ui_queue.put(("log", f"Processing {file_name}..."))
 
     try:
-        with ZipFile(file_path, 'r') as zipObj:
+        with ZipFile(file_path, "r") as zipObj:
             zipObj.extractall(unzip_path)
-        log_message(f"Extracted {file_name} successfully.")
+        ui_queue.put(("log", f"Extracted {file_name} successfully."))
     except Exception as e:
-        log_message(f"Failed to extract {file_name}: {e}")
+        ui_queue.put(("log", f"Failed to extract {file_name}: {e}"))
         return
 
     first_tags = """<?xml version='1.0' encoding='utf-8'?>\n<!DOCTYPE html PUBLIC '-//W3C//DTD XHTML 1.1//EN' 'http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd'>\n"""
 
-    html_files = [os.path.join(r, hfile) for r, d, f in os.walk(unzip_path) for hfile in f if hfile.endswith('html')]
+    html_files = [
+        os.path.join(r, hfile)
+        for r, d, f in os.walk(unzip_path)
+        for hfile in f
+        if hfile.endswith("html")
+    ]
 
     if not html_files:
-        log_message(f"No HTML files found in {file_name}")
+        ui_queue.put(("log", f"No HTML files found in {file_name}"))
         return
 
-    progress_label = ctk.CTkLabel(progress_inner_frame, text=truncate_text(file_name, 50), text_color="black")
-    progress_label.pack(pady=5)
-    progress_bar = ctk.CTkProgressBar(progress_inner_frame, orientation="horizontal", mode="determinate")
-    progress_bar.pack(pady=10, padx=10)
-    progress_bar.set(0)
-    progress_bar.configure(width=300)
+    ui_queue.put(("create_progress", file_name))
 
     step = 1 / len(html_files)
 
     for html_file in html_files:
         process_html_file(html_file, first_tags)
-        progress_bar.set(progress_bar.get() + step)
-        root.update_idletasks()
+        ui_queue.put(("update_progress", file_name, step))
 
     create_epub(epub_path, unzip_path, original_cwd)
 
-    log_message(f"Modified EPUB created at {epub_path}.epub")
+    ui_queue.put(("log", f"Modified EPUB created at {epub_path}.epub"))
 
 def truncate_text(text, max_length):
     return text if len(text) <= max_length else text[:max_length - 3] + '...'
@@ -160,9 +207,9 @@ def process_html_file(html_file, first_tags):
     try:
         with open(html_file, 'r', encoding='utf-8') as f:
             html_data = f.read()
-        log_message(f"Read {html_file} successfully.")
+        ui_queue.put(("log", f"Read {html_file} successfully."))
     except Exception as e:
-        log_message(f"Failed to read HTML file {html_file}: {e}")
+        ui_queue.put(("log", f"Failed to read HTML file {html_file}: {e}"))
         return
 
     parser = MyHTMLParser()
@@ -188,25 +235,25 @@ def process_html_file(html_file, first_tags):
     try:
         with open(html_file, 'w', encoding='utf-8') as f:
             f.write(full_html)
-        log_message(f"Wrote {html_file} successfully.")
+        ui_queue.put(("log", f"Wrote {html_file} successfully."))
     except Exception as e:
-        log_message(f"Failed to write HTML file {html_file}: {e}")
+        ui_queue.put(("log", f"Failed to write HTML file {html_file}: {e}"))
 
 def create_epub(epub_path, unzip_path, original_cwd):
     try:
         os.chdir(unzip_path)
-        shutil.make_archive(epub_path, 'zip', './')
+        shutil.make_archive(epub_path, "zip", "./")
         os.chdir(original_cwd)
-        shutil.move(epub_path + '.zip', epub_path + '.epub')
-        log_message(f"Created EPUB file {epub_path}.epub successfully.")
+        shutil.move(epub_path + ".zip", epub_path + ".epub")
+        ui_queue.put(("log", f"Created EPUB file {epub_path}.epub successfully."))
     except Exception as e:
-        log_message(f"Failed to create EPUB file {epub_path}: {e}")
+        ui_queue.put(("log", f"Failed to create EPUB file {epub_path}: {e}"))
     finally:
         try:
             shutil.rmtree(unzip_path)
-            log_message(f"Removed temporary directory {unzip_path} successfully.")
+            ui_queue.put(("log", f"Removed temporary directory {unzip_path} successfully."))
         except Exception as e:
-            log_message(f"Failed to remove temporary directory {unzip_path}: {e}")
+            ui_queue.put(("log", f"Failed to remove temporary directory {unzip_path}: {e}"))
 
 # Configuración de la interfaz gráfica con customtkinter
 ctk.set_appearance_mode("System")  # Opciones: "System" (Default), "Light", "Dark"
@@ -275,5 +322,8 @@ generate_button = ctk.CTkButton(
     command=lambda: generate_epubs(state.selected_file_paths, state.selected_dest_folder),
 )
 generate_button.pack(pady=10)
+
+# Start polling the queue for UI updates
+root.after(100, handle_ui_queue)
 
 root.mainloop()
