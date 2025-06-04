@@ -10,15 +10,15 @@ import subprocess
 import sys
 import logging
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from tkinter import filedialog, messagebox
+from typing import Dict
+
+from settings import Settings, load_settings, save_settings
 try:
     import customtkinter as ctk
-except ImportError:  # pragma: no cover - UI message only
-    messagebox.showerror(
-        "Missing Dependency",
-        "customtkinter is required. Please run 'pip install customtkinter'",
-    )
-    raise SystemExit(1)
+except ImportError:  # pragma: no cover - allow import without GUI deps
+    ctk = None  # type: ignore
 from zipfile import ZipFile, BadZipFile
 from contextlib import contextmanager
 from html.parser import HTMLParser
@@ -36,12 +36,45 @@ class AppState:
 # Application state and logging
 state = AppState()
 
+# Load user settings
+settings = load_settings()
+
+translations: Dict[str, Dict[str, str]] = {
+    "en": {
+        "select_files": "Select EPUB Files",
+        "select_destination": "Select Destination Folder",
+        "generate": "Generate Modified EPUBs",
+        "cancel": "Cancel",
+        "open_destination": "Open Destination",
+        "open_when_done": "Open when done",
+        "no_files": "No files selected",
+        "files_selected": "{count} files selected",
+        "no_dest": "No destination folder selected",
+        "destination": "Destination: {path}",
+    },
+    "es": {
+        "select_files": "Seleccionar EPUBs",
+        "select_destination": "Seleccionar carpeta destino",
+        "generate": "Generar EPUBs",
+        "cancel": "Cancelar",
+        "open_destination": "Abrir destino",
+        "open_when_done": "Abrir al terminar",
+        "no_files": "Ning\u00fan archivo seleccionado",
+        "files_selected": "{count} archivos seleccionados",
+        "no_dest": "Sin carpeta destino",
+        "destination": "Destino: {path}",
+    },
+}
+
+def t(key: str, **kwargs) -> str:
+    return translations.get(settings.language, translations["en"]).get(key, key).format(**kwargs)
+
 logger = logging.getLogger(__name__)
 
 # Queue for safely communicating UI updates from worker threads
 ui_queue = Queue()
 # Store per-file progress bars
-progress_bars = {}
+progress_bars: Dict[str, tuple] = {}
 # Overall progress bar reference created at runtime
 overall_progress = None
 ui_poll_id = None
@@ -95,10 +128,10 @@ def select_epubs() -> list[str]:
     Returns a list of unique file paths selected by the user.
     """
     file_paths = filedialog.askopenfilenames(filetypes=[("EPUB files", "*.epub")])
-    unique_paths = list(dict.fromkeys(file_paths))
+    unique_paths = [p for p in dict.fromkeys(file_paths) if Path(p).exists()]
     state.selected_file_paths = list(unique_paths)
     file_label.configure(
-        text=f"{len(unique_paths)} files selected" if unique_paths else "No files selected"
+        text=t("files_selected", count=len(unique_paths)) if unique_paths else t("no_files")
     )
     return state.selected_file_paths
 
@@ -106,12 +139,14 @@ def select_destination_folder() -> str:
     """Prompt user for destination folder and ensure subfolder exists."""
     dest_folder = filedialog.askdirectory()
     if dest_folder:
-        dest_path = Path(dest_folder) / "Generados"
+        settings.dest_subfolder = subfolder_entry.get() or settings.dest_subfolder
+        dest_path = Path(dest_folder) / settings.dest_subfolder
         dest_path.mkdir(parents=True, exist_ok=True)
-        dest_folder_label.configure(text=truncate_text(f"Destination: {dest_path}", 50))
+        dest_folder_label.configure(text=truncate_text(t("destination", path=dest_path), 50))
         state.selected_dest_folder = str(dest_path)
+        settings.dest_folder = str(dest_folder)
     else:
-        dest_folder_label.configure(text="No destination folder selected")
+        dest_folder_label.configure(text=t("no_dest"))
         state.selected_dest_folder = ""
     return state.selected_dest_folder
 
@@ -139,6 +174,7 @@ def log_message(message: str) -> None:
 def change_theme(new_theme):
     """Update application appearance mode."""
     ctk.set_appearance_mode(new_theme)
+    settings.theme = new_theme
 
 
 def handle_ui_queue():
@@ -162,16 +198,20 @@ def handle_ui_queue():
                 orientation="horizontal",
                 mode="determinate",
             )
-            bar.pack(pady=10, padx=10)
+            bar.pack(pady=3, padx=10)
             bar.set(0)
             bar.configure(width=300)
-            progress_bars[file_name] = bar
+            pct = ctk.CTkLabel(progress_inner_frame, text="0%", text_color="black")
+            pct.pack(pady=1)
+            progress_bars[file_name] = (bar, pct)
         elif etype == "update_progress":
             file_name = event[1]
             inc = event[2]
-            bar = progress_bars.get(file_name)
-            if bar:
+            bar_tuple = progress_bars.get(file_name)
+            if bar_tuple:
+                bar, pct = bar_tuple
                 bar.set(min(bar.get() + inc, 1))
+                pct.configure(text=f"{int(bar.get()*100)}%")
         elif etype == "overall_progress":
             inc = event[1]
             if overall_progress:
@@ -185,6 +225,8 @@ def handle_ui_queue():
         elif etype == "finished":
             cancel_button.configure(state="disabled")
             open_folder_button.configure(state="normal")
+            if open_when_done_var.get():
+                open_destination_folder(state.selected_dest_folder)
     ui_poll_id = root.after(100, handle_ui_queue)
 
 
@@ -192,6 +234,8 @@ def on_close(win) -> None:
     """Handle application shutdown."""
     if ui_poll_id:
         win.after_cancel(ui_poll_id)
+    settings.open_on_finish = open_when_done_var.get()
+    save_settings(settings)
     win.destroy()
 
 def generate_epubs(file_paths, dest_folder: str) -> None:
@@ -221,18 +265,24 @@ def generate_epubs(file_paths, dest_folder: str) -> None:
     def process_files():
         cancel_event.clear()
         ui_queue.put(("start_processing", None))
-        for file_path in file_paths:
-            if cancel_event.is_set():
-                ui_queue.put(("log", "Processing cancelled."))
-                break
-            generate_epub(Path(file_path), dest_path)
-            ui_queue.put(("overall_progress", step))
-        else:
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = []
+            for file_path in file_paths:
+                if cancel_event.is_set():
+                    break
+                futures.append(executor.submit(generate_epub, Path(file_path), dest_path))
+            for fut in futures:
+                if cancel_event.is_set():
+                    break
+                fut.result()
+                ui_queue.put(("overall_progress", step))
+        if not cancel_event.is_set():
             ui_queue.put(("log", "All EPUB files processed successfully."))
+        else:
+            ui_queue.put(("log", "Processing cancelled."))
         ui_queue.put(("finished", None))
 
-    thread = threading.Thread(target=process_files, daemon=True)
-    thread.start()
+    threading.Thread(target=process_files, daemon=True).start()
 
 def generate_epub(file_path: Path, dest_folder: Path) -> None:
     """Process a single EPUB file without performing UI updates."""
@@ -330,18 +380,24 @@ def create_epub(epub_path: Path, unzip_path: Path, original_cwd: Path) -> None:
 
 def main() -> None:
     """Initialize the UI and start the application."""
+    if ctk is None:
+        messagebox.showerror(
+            "Missing Dependency",
+            "customtkinter is required. Please run 'pip install customtkinter'",
+        )
+        return
     global root, progress_inner_frame, progress_canvas, progress_scrollbar
     global progress_scrollbar_horizontal, log_text, button_frame
-    global open_folder_button, cancel_button
+    global open_folder_button, cancel_button, open_when_done_var
     logging.basicConfig(
         filename="bionic.log",
         level=logging.INFO,
         format="%(asctime)s - %(message)s",
     )
 
-    # Configuración de la interfaz gráfica con customtkinter
-    ctk.set_appearance_mode("System")
-    ctk.set_default_color_theme("blue")
+    # UI configuration
+    ctk.set_appearance_mode(settings.theme)
+    ctk.set_default_color_theme("green")
 
     root = ctk.CTk()
     root.title("EPUB Modifier")
@@ -385,31 +441,53 @@ def main() -> None:
     title_label.pack(pady=10)
 
     theme_option = ctk.CTkOptionMenu(button_frame, values=["System", "Light", "Dark"], command=change_theme)
-    theme_option.set("System")
+    theme_option.set(settings.theme)
     theme_option.pack(pady=5)
 
-    file_label = ctk.CTkLabel(button_frame, text="No files selected", font=("Helvetica", 10))
+    def change_lang(lang):
+        settings.language = lang
+        file_label.configure(text=t("no_files"))
+        dest_folder_label.configure(text=t("no_dest"))
+        select_button.configure(text=t("select_files"))
+        dest_folder_button.configure(text=t("select_destination"))
+        generate_button.configure(text=t("generate"))
+        cancel_button.configure(text=t("cancel"))
+        open_folder_button.configure(text=t("open_destination"))
+
+    lang_option = ctk.CTkOptionMenu(button_frame, values=["en", "es"], command=change_lang)
+    lang_option.set(settings.language)
+    lang_option.pack(pady=5)
+
+    file_label = ctk.CTkLabel(button_frame, text=t("no_files"), font=("Helvetica", 10))
     file_label.pack(pady=10)
 
-    select_button = ctk.CTkButton(button_frame, text="Select EPUB Files", command=select_epubs)
+    select_button = ctk.CTkButton(button_frame, text=t("select_files"), command=select_epubs)
     select_button.pack(pady=10)
 
-    dest_folder_label = ctk.CTkLabel(button_frame, text="No destination folder selected", font=("Helvetica", 10))
+    dest_folder_label = ctk.CTkLabel(button_frame, text=t("no_dest"), font=("Helvetica", 10))
     dest_folder_label.pack(pady=10, fill="both", expand=True)
 
-    dest_folder_button = ctk.CTkButton(button_frame, text="Select Destination Folder", command=select_destination_folder)
+    dest_folder_button = ctk.CTkButton(button_frame, text=t("select_destination"), command=select_destination_folder)
     dest_folder_button.pack(pady=10)
+
+    subfolder_entry = ctk.CTkEntry(button_frame)
+    subfolder_entry.insert(0, settings.dest_subfolder)
+    subfolder_entry.pack(pady=5)
+
+    open_when_done_var = ctk.BooleanVar(value=settings.open_on_finish)
+    open_when_done = ctk.CTkCheckBox(button_frame, text=t("open_when_done"), variable=open_when_done_var)
+    open_when_done.pack(pady=5)
 
     generate_button = ctk.CTkButton(
         button_frame,
-        text="Generate Modified EPUBs",
+        text=t("generate"),
         command=lambda: generate_epubs(state.selected_file_paths, state.selected_dest_folder),
     )
     generate_button.pack(pady=10)
 
     cancel_button = ctk.CTkButton(
         button_frame,
-        text="Cancel",
+        text=t("cancel"),
         command=cancel_event.set,
         state="disabled",
     )
@@ -417,7 +495,7 @@ def main() -> None:
 
     open_folder_button = ctk.CTkButton(
         button_frame,
-        text="Open Destination",
+        text=t("open_destination"),
         command=lambda: open_destination_folder(state.selected_dest_folder),
         state="disabled",
     )
