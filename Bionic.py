@@ -9,12 +9,16 @@ from zipfile import ZipFile
 from html.parser import HTMLParser
 from math import ceil, log
 
+import PyPDF2
+from fpdf import FPDF
+
 
 class AppState:
     """Store user selections for files and destination folder."""
 
     def __init__(self):
         self.selected_file_paths = []
+        self.selected_pdf_paths = []
         self.selected_dest_folder = ""
 
 
@@ -52,6 +56,14 @@ def select_epubs():
     state.selected_file_paths = file_paths
     file_label.configure(
         text=f"{len(file_paths)} files selected" if file_paths else "No files selected"
+    )
+    return file_paths
+
+def select_pdfs():
+    file_paths = filedialog.askopenfilenames(filetypes=[("PDF files", "*.pdf")])
+    state.selected_pdf_paths = file_paths
+    pdf_file_label.configure(
+        text=f"{len(file_paths)} PDFs selected" if file_paths else "No PDFs selected"
     )
     return file_paths
 
@@ -208,6 +220,56 @@ def create_epub(epub_path, unzip_path, original_cwd):
         except Exception as e:
             log_message(f"Failed to remove temporary directory {unzip_path}: {e}")
 
+def convert_pdf_to_bionic(file_path, dest_folder):
+    file_name = os.path.basename(file_path)
+    dest_path = os.path.join(dest_folder, 'b_' + file_name)
+    log_message(f"Processing PDF {file_name}...")
+    try:
+        reader = PyPDF2.PdfReader(file_path)
+    except Exception as e:
+        log_message(f"Failed to read {file_name}: {e}")
+        return
+
+    pdf_writer = FPDF()
+    pdf_writer.set_auto_page_break(auto=True, margin=15)
+
+    for page in reader.pages:
+        text = page.extract_text() or ""
+        pdf_writer.add_page()
+        for line in text.splitlines():
+            for part in re.findall(r'\w+|[^\s\w]+', line):
+                if part in string.punctuation or part in string.digits:
+                    pdf_writer.set_font("Helvetica", style="", size=12)
+                    pdf_writer.write(5, part)
+                else:
+                    point = ceil(log(len(part), 2)) if len(part) > 3 else 1
+                    pdf_writer.set_font("Helvetica", style="B", size=12)
+                    pdf_writer.write(5, part[:point])
+                    pdf_writer.set_font("Helvetica", style="", size=12)
+                    pdf_writer.write(5, part[point:])
+                pdf_writer.write(5, " ")
+            pdf_writer.ln()
+    try:
+        pdf_writer.output(dest_path)
+        log_message(f"Modified PDF saved at {dest_path}")
+    except Exception as e:
+        log_message(f"Failed to save modified PDF {file_name}: {e}")
+
+
+def generate_pdfs(file_paths, dest_folder):
+    if not file_paths:
+        messagebox.showerror("Error", "Please select PDF files first")
+        return
+    if not dest_folder:
+        messagebox.showerror("Error", "Please select a destination folder first")
+        return
+    if not os.path.exists(dest_folder):
+        os.makedirs(dest_folder)
+
+    for file_path in file_paths:
+        convert_pdf_to_bionic(file_path, dest_folder)
+    log_message("All PDF files processed successfully.")
+
 # Configuración de la interfaz gráfica con customtkinter
 ctk.set_appearance_mode("System")  # Opciones: "System" (Default), "Light", "Dark"
 ctk.set_default_color_theme("blue")  # Opciones: "blue" (Default), "green", "dark-blue"
@@ -262,6 +324,19 @@ file_label.pack(pady=10)
 
 select_button = ctk.CTkButton(button_frame, text="Select EPUB Files", command=select_epubs)
 select_button.pack(pady=10)
+
+pdf_file_label = ctk.CTkLabel(button_frame, text="No PDFs selected", font=("Helvetica", 10))
+pdf_file_label.pack(pady=10)
+
+select_pdf_button = ctk.CTkButton(button_frame, text="Select PDF Files", command=select_pdfs)
+select_pdf_button.pack(pady=10)
+
+generate_pdf_button = ctk.CTkButton(
+    button_frame,
+    text="Generate Bionic PDFs",
+    command=lambda: generate_pdfs(state.selected_pdf_paths, state.selected_dest_folder),
+)
+generate_pdf_button.pack(pady=10)
 
 dest_folder_label = ctk.CTkLabel(button_frame, text="No destination folder selected", font=("Helvetica", 10))
 dest_folder_label.pack(pady=10, fill="both", expand=True)
