@@ -9,6 +9,21 @@ from zipfile import ZipFile
 from html.parser import HTMLParser
 from math import ceil, log
 
+import PyPDF2
+from fpdf import FPDF
+
+
+class AppState:
+    """Store user selections for files and destination folder."""
+
+    def __init__(self):
+        self.selected_file_paths = []
+        self.selected_pdf_paths = []
+        self.selected_dest_folder = ""
+
+
+state = AppState()
+
 class MyHTMLParser(HTMLParser):
     def __init__(self):
         super().__init__()
@@ -26,19 +41,30 @@ class MyHTMLParser(HTMLParser):
 
 def bolding(text):
     parts = re.findall(r'\w+|[^\s\w]+', text)
-    new_text = ''
+    processed_parts = []
     for part in parts:
         if part in string.punctuation or part in string.digits:
-            new_text += part
+            processed_parts.append(part)
         else:
             point = ceil(log(len(part), 2)) if len(part) > 3 else 1
             new_part = f"<b>{part[:point]}</b>{part[point:]}"
-            new_text += ' ' + new_part
-    return new_text
+            processed_parts.append(new_part)
+    return ' '.join(processed_parts)
 
 def select_epubs():
     file_paths = filedialog.askopenfilenames(filetypes=[("EPUB files", "*.epub")])
-    file_label.configure(text=f"{len(file_paths)} files selected" if file_paths else "No files selected")
+    state.selected_file_paths = file_paths
+    file_label.configure(
+        text=f"{len(file_paths)} files selected" if file_paths else "No files selected"
+    )
+    return file_paths
+
+def select_pdfs():
+    file_paths = filedialog.askopenfilenames(filetypes=[("PDF files", "*.pdf")])
+    state.selected_pdf_paths = file_paths
+    pdf_file_label.configure(
+        text=f"{len(file_paths)} PDFs selected" if file_paths else "No PDFs selected"
+    )
     return file_paths
 
 def select_destination_folder():
@@ -47,9 +73,12 @@ def select_destination_folder():
         dest_folder = os.path.join(dest_folder, "Generados")
         if not os.path.exists(dest_folder):
             os.makedirs(dest_folder)
-        dest_folder_label.configure(text=truncate_text(f"Destination: {dest_folder}", 50))
+        dest_folder_label.configure(
+            text=truncate_text(f"Destination: {dest_folder}", 50)
+        )
     else:
         dest_folder_label.configure(text="No destination folder selected")
+    state.selected_dest_folder = dest_folder
     return dest_folder
 
 def log_message(message):
@@ -57,6 +86,10 @@ def log_message(message):
     log_text.insert(ctk.END, message + '\n')
     log_text.configure(state='disabled')
     log_text.yview(ctk.END)
+
+def change_theme(new_theme):
+    """Update application appearance mode."""
+    ctk.set_appearance_mode(new_theme)
 
 def generate_epubs(file_paths, dest_folder):
     if not file_paths:
@@ -154,7 +187,10 @@ def process_html_file(html_file, first_tags):
         if len(html_part) == 2 and html_part[0][0] == 'Start tag:':
             tag = '<' + html_part[0][1]
             full_attr = [f'{attr[0]}="{attr[1]}"' for attr in html_part[1][1]]
-            tag += ' ' + ' '.join(full_attr) + '>'
+            attr_str = ' '.join(full_attr)
+            if attr_str:
+                tag += ' ' + attr_str
+            tag += '>'
             full_html += tag
         if html_part[0] == 'End tag:':
             tag = f"</{html_part[1]}>"
@@ -183,6 +219,56 @@ def create_epub(epub_path, unzip_path, original_cwd):
             log_message(f"Removed temporary directory {unzip_path} successfully.")
         except Exception as e:
             log_message(f"Failed to remove temporary directory {unzip_path}: {e}")
+
+def convert_pdf_to_bionic(file_path, dest_folder):
+    file_name = os.path.basename(file_path)
+    dest_path = os.path.join(dest_folder, 'b_' + file_name)
+    log_message(f"Processing PDF {file_name}...")
+    try:
+        reader = PyPDF2.PdfReader(file_path)
+    except Exception as e:
+        log_message(f"Failed to read {file_name}: {e}")
+        return
+
+    pdf_writer = FPDF()
+    pdf_writer.set_auto_page_break(auto=True, margin=15)
+
+    for page in reader.pages:
+        text = page.extract_text() or ""
+        pdf_writer.add_page()
+        for line in text.splitlines():
+            for part in re.findall(r'\w+|[^\s\w]+', line):
+                if part in string.punctuation or part in string.digits:
+                    pdf_writer.set_font("Helvetica", style="", size=12)
+                    pdf_writer.write(5, part)
+                else:
+                    point = ceil(log(len(part), 2)) if len(part) > 3 else 1
+                    pdf_writer.set_font("Helvetica", style="B", size=12)
+                    pdf_writer.write(5, part[:point])
+                    pdf_writer.set_font("Helvetica", style="", size=12)
+                    pdf_writer.write(5, part[point:])
+                pdf_writer.write(5, " ")
+            pdf_writer.ln()
+    try:
+        pdf_writer.output(dest_path)
+        log_message(f"Modified PDF saved at {dest_path}")
+    except Exception as e:
+        log_message(f"Failed to save modified PDF {file_name}: {e}")
+
+
+def generate_pdfs(file_paths, dest_folder):
+    if not file_paths:
+        messagebox.showerror("Error", "Please select PDF files first")
+        return
+    if not dest_folder:
+        messagebox.showerror("Error", "Please select a destination folder first")
+        return
+    if not os.path.exists(dest_folder):
+        os.makedirs(dest_folder)
+
+    for file_path in file_paths:
+        convert_pdf_to_bionic(file_path, dest_folder)
+    log_message("All PDF files processed successfully.")
 
 # Configuración de la interfaz gráfica con customtkinter
 ctk.set_appearance_mode("System")  # Opciones: "System" (Default), "Light", "Dark"
@@ -229,11 +315,28 @@ log_text.configure(yscrollcommand=log_scroll.set)
 title_label = ctk.CTkLabel(button_frame, text="EPUB Modifier", font=("Helvetica", 16))
 title_label.pack(pady=10)
 
+theme_option = ctk.CTkOptionMenu(button_frame, values=["System", "Light", "Dark"], command=change_theme)
+theme_option.set("System")
+theme_option.pack(pady=5)
+
 file_label = ctk.CTkLabel(button_frame, text="No files selected", font=("Helvetica", 10))
 file_label.pack(pady=10)
 
-select_button = ctk.CTkButton(button_frame, text="Select EPUB Files", command=lambda: generate_epubs(select_epubs(), select_destination_folder()))
+select_button = ctk.CTkButton(button_frame, text="Select EPUB Files", command=select_epubs)
 select_button.pack(pady=10)
+
+pdf_file_label = ctk.CTkLabel(button_frame, text="No PDFs selected", font=("Helvetica", 10))
+pdf_file_label.pack(pady=10)
+
+select_pdf_button = ctk.CTkButton(button_frame, text="Select PDF Files", command=select_pdfs)
+select_pdf_button.pack(pady=10)
+
+generate_pdf_button = ctk.CTkButton(
+    button_frame,
+    text="Generate Bionic PDFs",
+    command=lambda: generate_pdfs(state.selected_pdf_paths, state.selected_dest_folder),
+)
+generate_pdf_button.pack(pady=10)
 
 dest_folder_label = ctk.CTkLabel(button_frame, text="No destination folder selected", font=("Helvetica", 10))
 dest_folder_label.pack(pady=10, fill="both", expand=True)
@@ -241,7 +344,11 @@ dest_folder_label.pack(pady=10, fill="both", expand=True)
 dest_folder_button = ctk.CTkButton(button_frame, text="Select Destination Folder", command=select_destination_folder)
 dest_folder_button.pack(pady=10)
 
-generate_button = ctk.CTkButton(button_frame, text="Generate Modified EPUBs", command=lambda: generate_epubs(select_epubs(), select_destination_folder()))
+generate_button = ctk.CTkButton(
+    button_frame,
+    text="Generate Modified EPUBs",
+    command=lambda: generate_epubs(state.selected_file_paths, state.selected_dest_folder),
+)
 generate_button.pack(pady=10)
 
 root.mainloop()
