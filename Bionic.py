@@ -2,12 +2,14 @@
 import os
 import re
 import shutil
-import string
 import threading
+from dataclasses import dataclass, field
 from queue import Queue
 from pathlib import Path
 import subprocess
 import sys
+import logging
+import tempfile
 from tkinter import filedialog, messagebox
 try:
     import customtkinter as ctk
@@ -23,15 +25,18 @@ from html.parser import HTMLParser
 from math import ceil, log
 
 
+@dataclass
 class AppState:
     """Store user selections for files and destination folder."""
 
-    def __init__(self):
-        self.selected_file_paths = []
-        self.selected_dest_folder = ""
+    selected_file_paths: list[str] = field(default_factory=list)
+    selected_dest_folder: str = ""
 
 
+# Application state and logging
 state = AppState()
+
+logger = logging.getLogger(__name__)
 
 # Queue for safely communicating UI updates from worker threads
 ui_queue = Queue()
@@ -40,6 +45,7 @@ progress_bars = {}
 # Overall progress bar reference created at runtime
 overall_progress = None
 ui_poll_id = None
+cancel_event = threading.Event()
 
 
 @contextmanager
@@ -83,13 +89,18 @@ def bolding(text: str) -> str:
             result.append(processed)
     return ' '.join(result)
 
-def select_epubs():
+def select_epubs() -> list[str]:
+    """Prompt for EPUB files and update the label.
+
+    Returns a list of unique file paths selected by the user.
+    """
     file_paths = filedialog.askopenfilenames(filetypes=[("EPUB files", "*.epub")])
-    state.selected_file_paths = file_paths
+    unique_paths = list(dict.fromkeys(file_paths))
+    state.selected_file_paths = list(unique_paths)
     file_label.configure(
-        text=f"{len(file_paths)} files selected" if file_paths else "No files selected"
+        text=f"{len(unique_paths)} files selected" if unique_paths else "No files selected"
     )
-    return file_paths
+    return state.selected_file_paths
 
 def select_destination_folder() -> str:
     """Prompt user for destination folder and ensure subfolder exists."""
@@ -106,8 +117,8 @@ def select_destination_folder() -> str:
 
 
 def open_destination_folder(path: str) -> None:
-    """Open the given folder with the default file manager."""
-    if not path:
+    """Open the given folder with the default file manager if it exists."""
+    if not path or not Path(path).exists():
         return
     if os.name == "nt":
         os.startfile(path)
@@ -116,10 +127,13 @@ def open_destination_folder(path: str) -> None:
     else:
         subprocess.run(["xdg-open", path])
 
-def log_message(message):
-    log_text.configure(state='normal')
-    log_text.insert(ctk.END, message + '\n')
-    log_text.configure(state='disabled')
+
+def log_message(message: str) -> None:
+    """Append a message to the log textbox and to the log file."""
+    logger.info(message)
+    log_text.configure(state="normal")
+    log_text.insert(ctk.END, message + "\n")
+    log_text.configure(state="disabled")
     log_text.yview(ctk.END)
 
 def change_theme(new_theme):
@@ -164,6 +178,13 @@ def handle_ui_queue():
                 overall_progress.set(min(overall_progress.get() + inc, 1))
         elif etype == "enable_open":
             open_folder_button.configure(state="normal")
+            cancel_button.configure(state="disabled")
+        elif etype == "start_processing":
+            cancel_button.configure(state="normal")
+            open_folder_button.configure(state="disabled")
+        elif etype == "finished":
+            cancel_button.configure(state="disabled")
+            open_folder_button.configure(state="normal")
     ui_poll_id = root.after(100, handle_ui_queue)
 
 
@@ -198,54 +219,63 @@ def generate_epubs(file_paths, dest_folder: str) -> None:
     step = 1 / len(file_paths)
 
     def process_files():
+        cancel_event.clear()
+        ui_queue.put(("start_processing", None))
         for file_path in file_paths:
+            if cancel_event.is_set():
+                ui_queue.put(("log", "Processing cancelled."))
+                break
             generate_epub(Path(file_path), dest_path)
             ui_queue.put(("overall_progress", step))
-        ui_queue.put(("log", "All EPUB files processed successfully."))
-        ui_queue.put(("enable_open", None))
+        else:
+            ui_queue.put(("log", "All EPUB files processed successfully."))
+        ui_queue.put(("finished", None))
 
     thread = threading.Thread(target=process_files, daemon=True)
     thread.start()
 
 def generate_epub(file_path: Path, dest_folder: Path) -> None:
     """Process a single EPUB file without performing UI updates."""
+    if cancel_event.is_set():
+        return
     original_cwd = Path.cwd()
     file_name = file_path.name
     epub_path = dest_folder / f"b_{file_name}"
-    unzip_path = original_cwd / f"{file_name}_zip"
 
     ui_queue.put(("log", f"Processing {file_name}..."))
 
     try:
-        with ZipFile(file_path, "r") as zipObj:
-            zipObj.extractall(unzip_path)
-        ui_queue.put(("log", f"Extracted {file_name} successfully."))
+        with tempfile.TemporaryDirectory() as tmpdir:
+            unzip_path = Path(tmpdir)
+            with ZipFile(file_path, "r") as zipObj:
+                zipObj.extractall(unzip_path)
+            ui_queue.put(("log", f"Extracted {file_name} successfully."))
+
+            first_tags = """<?xml version='1.0' encoding='utf-8'?>\n<!DOCTYPE html PUBLIC '-//W3C//DTD XHTML 1.1//EN' 'http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd'>\n"""
+
+            html_files = [str(p) for p in unzip_path.rglob("*.html")]
+
+            if not html_files:
+                ui_queue.put(("log", f"No HTML files found in {file_name}"))
+                return
+
+            ui_queue.put(("create_progress", file_name))
+
+            step = 1 / len(html_files)
+
+            for html_file in html_files:
+                if cancel_event.is_set():
+                    return
+                process_html_file(html_file, first_tags)
+                ui_queue.put(("update_progress", file_name, step))
+
+            create_epub(epub_path, unzip_path, original_cwd)
+
+            ui_queue.put(("log", f"Modified EPUB created at {epub_path}.epub"))
     except BadZipFile as e:
         ui_queue.put(("log", f"Bad EPUB archive {file_name}: {e}"))
-        return
     except Exception as e:
-        ui_queue.put(("log", f"Failed to extract {file_name}: {e}"))
-        return
-
-    first_tags = """<?xml version='1.0' encoding='utf-8'?>\n<!DOCTYPE html PUBLIC '-//W3C//DTD XHTML 1.1//EN' 'http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd'>\n"""
-
-    html_files = [str(p) for p in Path(unzip_path).rglob("*.html")]
-
-    if not html_files:
-        ui_queue.put(("log", f"No HTML files found in {file_name}"))
-        return
-
-    ui_queue.put(("create_progress", file_name))
-
-    step = 1 / len(html_files)
-
-    for html_file in html_files:
-        process_html_file(html_file, first_tags)
-        ui_queue.put(("update_progress", file_name, step))
-
-    create_epub(epub_path, unzip_path, original_cwd)
-
-    ui_queue.put(("log", f"Modified EPUB created at {epub_path}.epub"))
+        ui_queue.put(("log", f"Failed to process {file_name}: {e}"))
 
 def truncate_text(text: str, max_length: int) -> str:
     """Return text truncated to the specified length."""
@@ -297,18 +327,17 @@ def create_epub(epub_path: Path, unzip_path: Path, original_cwd: Path) -> None:
         ui_queue.put(("log", f"Created EPUB file {epub_path}.epub successfully."))
     except Exception as e:
         ui_queue.put(("log", f"Failed to create EPUB file {epub_path}: {e}"))
-    finally:
-        try:
-            if original_cwd in unzip_path.resolve().parents:
-                shutil.rmtree(unzip_path)
-            ui_queue.put(("log", f"Removed temporary directory {unzip_path} successfully."))
-        except Exception as e:
-            ui_queue.put(("log", f"Failed to remove temporary directory {unzip_path}: {e}"))
 
 def main() -> None:
     """Initialize the UI and start the application."""
     global root, progress_inner_frame, progress_canvas, progress_scrollbar
-    global progress_scrollbar_horizontal, log_text, button_frame, open_folder_button
+    global progress_scrollbar_horizontal, log_text, button_frame
+    global open_folder_button, cancel_button
+    logging.basicConfig(
+        filename="bionic.log",
+        level=logging.INFO,
+        format="%(asctime)s - %(message)s",
+    )
 
     # Configuración de la interfaz gráfica con customtkinter
     ctk.set_appearance_mode("System")
@@ -377,6 +406,14 @@ def main() -> None:
         command=lambda: generate_epubs(state.selected_file_paths, state.selected_dest_folder),
     )
     generate_button.pack(pady=10)
+
+    cancel_button = ctk.CTkButton(
+        button_frame,
+        text="Cancel",
+        command=cancel_event.set,
+        state="disabled",
+    )
+    cancel_button.pack(pady=10)
 
     open_folder_button = ctk.CTkButton(
         button_frame,
