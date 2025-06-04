@@ -36,6 +36,12 @@ class AppState:
 # Application state and logging
 state = AppState()
 
+# Widgets accessed across functions are initialized in `main` but defined here
+# to provide global names that callback functions can reference.
+file_label = None
+dest_folder_label = None
+subfolder_entry = None
+
 # Load user settings
 settings = load_settings()
 
@@ -398,6 +404,7 @@ def main() -> None:
     global root, progress_inner_frame, progress_canvas, progress_scrollbar
     global progress_scrollbar_horizontal, log_text, button_frame
     global open_folder_button, cancel_button, open_when_done_var
+    global file_label, dest_folder_label, subfolder_entry
     logging.basicConfig(
         filename="bionic.log",
         level=logging.INFO,
