@@ -51,6 +51,9 @@ translations: Dict[str, Dict[str, str]] = {
         "files_selected": "{count} files selected",
         "no_dest": "No destination folder selected",
         "destination": "Destination: {path}",
+        "clear_files": "Clear Files",
+        "about": "About",
+        "about_message": "Bionic Reading\nVersion 1.0",
     },
     "es": {
         "select_files": "Seleccionar EPUBs",
@@ -63,6 +66,9 @@ translations: Dict[str, Dict[str, str]] = {
         "files_selected": "{count} archivos seleccionados",
         "no_dest": "Sin carpeta destino",
         "destination": "Destino: {path}",
+        "clear_files": "Borrar archivos",
+        "about": "Acerca de",
+        "about_message": "Bionic Reading\nVersi\u00f3n 1.0",
     },
 }
 
@@ -135,6 +141,11 @@ def select_epubs() -> list[str]:
     )
     return state.selected_file_paths
 
+def clear_files() -> None:
+    """Clear the selected EPUB list and update the label."""
+    state.selected_file_paths.clear()
+    file_label.configure(text=t("no_files"))
+
 def select_destination_folder() -> str:
     """Prompt user for destination folder and ensure subfolder exists."""
     dest_folder = filedialog.askdirectory()
@@ -161,6 +172,10 @@ def open_destination_folder(path: str) -> None:
         subprocess.run(["open", path])
     else:
         subprocess.run(["xdg-open", path])
+
+def show_about() -> None:
+    """Display an about dialog."""
+    messagebox.showinfo(t("about"), t("about_message"))
 
 
 def log_message(message: str) -> None:
@@ -253,13 +268,7 @@ def generate_epubs(file_paths, dest_folder: str) -> None:
     for widget in progress_inner_frame.winfo_children():
         widget.destroy()
 
-    overall_progress = ctk.CTkProgressBar(
-        progress_inner_frame, orientation="horizontal", mode="determinate"
-    )
-    overall_progress.pack(pady=10, padx=10)
     overall_progress.set(0)
-    overall_progress.configure(width=300)
-
     step = 1 / len(file_paths)
 
     def process_files():
@@ -427,6 +436,15 @@ def main() -> None:
     progress_inner_frame.bind("<Configure>", lambda e: progress_canvas.configure(scrollregion=progress_canvas.bbox("all")))
     progress_canvas.configure(yscrollcommand=progress_scrollbar.set, xscrollcommand=progress_scrollbar_horizontal.set)
 
+    # Overall progress bar always visible
+    global overall_progress
+    overall_progress = ctk.CTkProgressBar(
+        progress_outer_frame, orientation="horizontal", mode="determinate"
+    )
+    overall_progress.pack(pady=10, padx=10, fill="x")
+    overall_progress.set(0)
+    overall_progress.configure(width=300)
+
     log_frame = ctk.CTkFrame(root)
     log_frame.pack(pady=10, fill="both", expand=True)
 
@@ -463,6 +481,9 @@ def main() -> None:
 
     select_button = ctk.CTkButton(button_frame, text=t("select_files"), command=select_epubs)
     select_button.pack(pady=10)
+
+    clear_button = ctk.CTkButton(button_frame, text=t("clear_files"), command=clear_files)
+    clear_button.pack(pady=5)
 
     dest_folder_label = ctk.CTkLabel(button_frame, text=t("no_dest"), font=("Helvetica", 10))
     dest_folder_label.pack(pady=10, fill="both", expand=True)
@@ -501,9 +522,16 @@ def main() -> None:
     )
     open_folder_button.pack(pady=10)
 
+    about_button = ctk.CTkButton(button_frame, text=t("about"), command=show_about)
+    about_button.pack(pady=5)
+
     # Start polling the queue for UI updates
     global ui_poll_id
     ui_poll_id = root.after(100, handle_ui_queue)
+
+    # Keyboard shortcuts
+    root.bind("<Control-o>", lambda _e: select_epubs())
+    root.bind("<Control-q>", lambda _e: on_close(root))
 
     root.protocol("WM_DELETE_WINDOW", lambda: on_close(root))
 

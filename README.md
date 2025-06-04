@@ -14,6 +14,10 @@ Launching the application creates a `settings.json` file to remember your langua
 python Bionic.py
 ```
 
+Shortcuts:
+* **Ctrl+O** - select EPUB files
+* **Ctrl+Q** - quit the application
+
 ## Running from the command line
 ```bash
 python cli.py -d OUTPUT_DIR file1.epub file2.epub
@@ -30,3 +34,5 @@ To build a standalone executable:
 ```bash
 pyinstaller --onefile Bionic.py
 ```
+
+Additional GUI features include a **Clear Files** button and an **About** dialog accessible from the main window.
